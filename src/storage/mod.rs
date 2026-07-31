@@ -8,10 +8,12 @@ or `alloc` crates being available, and heap-allocated memory.
 mod assembler;
 mod packet_buffer;
 mod ring_buffer;
+mod slice_like;
 
 pub use self::assembler::Assembler;
 pub use self::packet_buffer::{PacketBuffer, PacketMetadata};
 pub use self::ring_buffer::RingBuffer;
+pub use self::slice_like::SliceLike;
 
 /// A trait for setting a value to a known state.
 ///

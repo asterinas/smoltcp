@@ -1474,11 +1474,12 @@ impl<'a> Socket<'a> {
         }
     }
 
-    pub fn process(
+    pub fn process<P: crate::storage::SliceLike<Item = u8>>(
         &mut self,
         cx: &mut Context,
         ip_repr: &IpRepr,
         repr: &TcpRepr,
+        repr_payload: P,
     ) -> Option<(IpRepr, TcpRepr<'static>)> {
         debug_assert!(self.accepts(cx, ip_repr, repr));
 
@@ -1598,11 +1599,11 @@ impl<'a> Socket<'a> {
         let window_start = self.remote_seq_no + self.rx_buffer.len();
         let window_end = self.remote_seq_no + self.rx_buffer.capacity();
         let segment_start = repr.seq_number;
-        let segment_end = repr.seq_number + repr.payload.len();
+        let segment_end = repr.seq_number + repr_payload.len();
 
         let (payload, payload_offset) = match self.state {
             // In LISTEN and SYN-SENT states, we have not yet synchronized with the remote end.
-            State::Listen | State::SynSent => (&[][..], 0),
+            State::Listen | State::SynSent => (repr_payload.index(0..0), 0),
             _ => {
                 // https://www.rfc-editor.org/rfc/rfc9293.html#name-segment-acceptability-tests
                 let segment_in_window = match (
@@ -1667,7 +1668,7 @@ impl<'a> Socket<'a> {
                     self.local_rx_last_seq = Some(repr.seq_number);
 
                     (
-                        &repr.payload[overlap_start - segment_start..overlap_end - segment_start],
+                        repr_payload.index(overlap_start - segment_start..overlap_end - segment_start),
                         overlap_start - window_start,
                     )
                 } else {
@@ -1973,7 +1974,7 @@ impl<'a> Socket<'a> {
                 // Increment duplicate ACK count and set for retransmit if we just received
                 // the third duplicate ACK
                 Some(last_rx_ack)
-                    if repr.payload.is_empty()
+                    if repr_payload.is_empty()
                         && last_rx_ack == ack_number
                         && ack_number < self.remote_last_seq
                         && !is_window_update =>

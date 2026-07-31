@@ -24,7 +24,7 @@ impl InterfaceInner {
         {
             if tcp_socket.accepts(self, &ip_repr, &tcp_repr) {
                 return tcp_socket
-                    .process(self, &ip_repr, &tcp_repr)
+                    .process(self, &ip_repr, &tcp_repr, tcp_repr.payload)
                     .map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
             }
         }

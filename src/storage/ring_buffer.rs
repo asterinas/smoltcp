@@ -318,20 +318,21 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// starting at the given offset past the last allocated element, and return
     /// the amount written.
     #[must_use]
-    pub fn write_unallocated(&mut self, offset: usize, data: &[T]) -> usize
+    pub fn write_unallocated<P>(&mut self, offset: usize, data: P) -> usize
     where
         T: Copy,
+        P: super::SliceLike<Item = T>,
     {
         let (size_1, offset, data) = {
             let slice = self.get_unallocated(offset, data.len());
             let slice_len = slice.len();
-            slice.copy_from_slice(&data[..slice_len]);
-            (slice_len, offset + slice_len, &data[slice_len..])
+            data.index(0..slice_len).copy_to_slice(slice);
+            (slice_len, offset + slice_len, data.index(slice_len..data.len()))
         };
         let size_2 = {
             let slice = self.get_unallocated(offset, data.len());
             let slice_len = slice.len();
-            slice.copy_from_slice(&data[..slice_len]);
+            data.index(0..slice_len).copy_to_slice(slice);
             slice_len
         };
         size_1 + size_2

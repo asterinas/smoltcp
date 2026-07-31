@@ -490,13 +490,13 @@ impl<'a> Socket<'a> {
         true
     }
 
-    pub fn process(
+    pub fn process<P: crate::storage::SliceLike<Item = u8>>(
         &mut self,
         cx: &mut Context,
         meta: PacketMeta,
         ip_repr: &IpRepr,
         repr: &UdpRepr,
-        payload: &[u8],
+        payload: P,
     ) {
         debug_assert!(self.accepts(cx, ip_repr, repr));
 
@@ -521,7 +521,7 @@ impl<'a> Socket<'a> {
         };
 
         match self.rx_buffer.enqueue(size, metadata) {
-            Ok(buf) => buf.copy_from_slice(payload),
+            Ok(buf) => payload.copy_to_slice(buf),
             Err(_) => net_trace!(
                 "udp:{}:{}: buffer full, dropped incoming packet",
                 self.endpoint,
