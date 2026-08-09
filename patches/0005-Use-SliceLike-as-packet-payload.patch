@@ -1,0 +1,202 @@
+From dc15606381dcb46dcd12998468baeb0d59a7577f Mon Sep 17 00:00:00 2001
+From: Ruihan Li <lrh2000@pku.edu.cn>
+Date: Fri, 31 Jul 2026 17:40:07 +0800
+Subject: [PATCH 5/5] Use `SliceLike` as packet payload
+
+---
+ src/iface/interface/tcp.rs |  2 +-
+ src/socket/tcp.rs          | 11 ++++++-----
+ src/socket/udp.rs          |  6 +++---
+ src/storage/mod.rs         |  2 ++
+ src/storage/ring_buffer.rs |  9 +++++----
+ src/storage/slice_like.rs  | 39 ++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 56 insertions(+), 13 deletions(-)
+ create mode 100644 src/storage/slice_like.rs
+
+diff --git a/src/iface/interface/tcp.rs b/src/iface/interface/tcp.rs
+index ec3ace3..60b968e 100644
+--- a/src/iface/interface/tcp.rs
++++ b/src/iface/interface/tcp.rs
+@@ -24,7 +24,7 @@ impl InterfaceInner {
+         {
+             if tcp_socket.accepts(self, &ip_repr, &tcp_repr) {
+                 return tcp_socket
+-                    .process(self, &ip_repr, &tcp_repr)
++                    .process(self, &ip_repr, &tcp_repr, tcp_repr.payload)
+                     .map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
+             }
+         }
+diff --git a/src/socket/tcp.rs b/src/socket/tcp.rs
+index 5a80ad3..3ee567a 100644
+--- a/src/socket/tcp.rs
++++ b/src/socket/tcp.rs
+@@ -1474,11 +1474,12 @@ impl<'a> Socket<'a> {
+         }
+     }
+ 
+-    pub fn process(
++    pub fn process<P: crate::storage::SliceLike<Item = u8>>(
+         &mut self,
+         cx: &mut Context,
+         ip_repr: &IpRepr,
+         repr: &TcpRepr,
++        repr_payload: P,
+     ) -> Option<(IpRepr, TcpRepr<'static>)> {
+         debug_assert!(self.accepts(cx, ip_repr, repr));
+ 
+@@ -1598,11 +1599,11 @@ impl<'a> Socket<'a> {
+         let window_start = self.remote_seq_no + self.rx_buffer.len();
+         let window_end = self.remote_seq_no + self.rx_buffer.capacity();
+         let segment_start = repr.seq_number;
+-        let segment_end = repr.seq_number + repr.payload.len();
++        let segment_end = repr.seq_number + repr_payload.len();
+ 
+         let (payload, payload_offset) = match self.state {
+             // In LISTEN and SYN-SENT states, we have not yet synchronized with the remote end.
+-            State::Listen | State::SynSent => (&[][..], 0),
++            State::Listen | State::SynSent => (repr_payload.index(0..0), 0),
+             _ => {
+                 // https://www.rfc-editor.org/rfc/rfc9293.html#name-segment-acceptability-tests
+                 let segment_in_window = match (
+@@ -1667,7 +1668,7 @@ impl<'a> Socket<'a> {
+                     self.local_rx_last_seq = Some(repr.seq_number);
+ 
+                     (
+-                        &repr.payload[overlap_start - segment_start..overlap_end - segment_start],
++                        repr_payload.index(overlap_start - segment_start..overlap_end - segment_start),
+                         overlap_start - window_start,
+                     )
+                 } else {
+@@ -1973,7 +1974,7 @@ impl<'a> Socket<'a> {
+                 // Increment duplicate ACK count and set for retransmit if we just received
+                 // the third duplicate ACK
+                 Some(last_rx_ack)
+-                    if repr.payload.is_empty()
++                    if repr_payload.is_empty()
+                         && last_rx_ack == ack_number
+                         && ack_number < self.remote_last_seq
+                         && !is_window_update =>
+diff --git a/src/socket/udp.rs b/src/socket/udp.rs
+index 1b1f9a1..0a3a34b 100644
+--- a/src/socket/udp.rs
++++ b/src/socket/udp.rs
+@@ -490,13 +490,13 @@ impl<'a> Socket<'a> {
+         true
+     }
+ 
+-    pub fn process(
++    pub fn process<P: crate::storage::SliceLike<Item = u8>>(
+         &mut self,
+         cx: &mut Context,
+         meta: PacketMeta,
+         ip_repr: &IpRepr,
+         repr: &UdpRepr,
+-        payload: &[u8],
++        payload: P,
+     ) {
+         debug_assert!(self.accepts(cx, ip_repr, repr));
+ 
+@@ -521,7 +521,7 @@ impl<'a> Socket<'a> {
+         };
+ 
+         match self.rx_buffer.enqueue(size, metadata) {
+-            Ok(buf) => buf.copy_from_slice(payload),
++            Ok(buf) => payload.copy_to_slice(buf),
+             Err(_) => net_trace!(
+                 "udp:{}:{}: buffer full, dropped incoming packet",
+                 self.endpoint,
+diff --git a/src/storage/mod.rs b/src/storage/mod.rs
+index b03de71..6221004 100644
+--- a/src/storage/mod.rs
++++ b/src/storage/mod.rs
+@@ -8,10 +8,12 @@ or `alloc` crates being available, and heap-allocated memory.
+ mod assembler;
+ mod packet_buffer;
+ mod ring_buffer;
++mod slice_like;
+ 
+ pub use self::assembler::Assembler;
+ pub use self::packet_buffer::{PacketBuffer, PacketMetadata};
+ pub use self::ring_buffer::RingBuffer;
++pub use self::slice_like::SliceLike;
+ 
+ /// A trait for setting a value to a known state.
+ ///
+diff --git a/src/storage/ring_buffer.rs b/src/storage/ring_buffer.rs
+index 7d461b6..b40b7c5 100644
+--- a/src/storage/ring_buffer.rs
++++ b/src/storage/ring_buffer.rs
+@@ -318,20 +318,21 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
+     /// starting at the given offset past the last allocated element, and return
+     /// the amount written.
+     #[must_use]
+-    pub fn write_unallocated(&mut self, offset: usize, data: &[T]) -> usize
++    pub fn write_unallocated<P>(&mut self, offset: usize, data: P) -> usize
+     where
+         T: Copy,
++        P: super::SliceLike<Item = T>,
+     {
+         let (size_1, offset, data) = {
+             let slice = self.get_unallocated(offset, data.len());
+             let slice_len = slice.len();
+-            slice.copy_from_slice(&data[..slice_len]);
+-            (slice_len, offset + slice_len, &data[slice_len..])
++            data.index(0..slice_len).copy_to_slice(slice);
++            (slice_len, offset + slice_len, data.index(slice_len..data.len()))
+         };
+         let size_2 = {
+             let slice = self.get_unallocated(offset, data.len());
+             let slice_len = slice.len();
+-            slice.copy_from_slice(&data[..slice_len]);
++            data.index(0..slice_len).copy_to_slice(slice);
+             slice_len
+         };
+         size_1 + size_2
+diff --git a/src/storage/slice_like.rs b/src/storage/slice_like.rs
+new file mode 100644
+index 0000000..bb49766
+--- /dev/null
++++ b/src/storage/slice_like.rs
+@@ -0,0 +1,39 @@
++use core::ops::Range;
++
++/// A slice-like object.
++///
++/// This can be implemented for a real slice or a slice-like object that behaves like a slice.
++pub trait SliceLike {
++    /// A type for the items contained in the slice.
++    type Item;
++
++    /// Returns the length of the slice.
++    fn len(&self) -> usize;
++
++    /// Returns whether the slice is empty.
++    fn is_empty(&self) -> bool {
++        self.len() == 0
++    }
++
++    /// Indexes the slice.
++    fn index(&self, range: Range<usize>) -> Self;
++
++    /// Copies to another slice.
++    fn copy_to_slice(&self, output: &mut [Self::Item]);
++}
++
++impl<T: Copy> SliceLike for &'_ [T] {
++    type Item = T;
++
++    fn len(&self) -> usize {
++        (*self).len()
++    }
++
++    fn index(&self, range: Range<usize>) -> Self {
++        &self[range]
++    }
++
++    fn copy_to_slice(&self, output: &mut [T]) {
++        output.copy_from_slice(self);
++    }
++}
+-- 
+2.55.0
+
